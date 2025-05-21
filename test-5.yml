@@ -1,0 +1,208 @@
+---
+# Example 5: Microservice PR Verification with Integration Testing
+# This pipeline verifies PRs for a microservice with unit tests, integration tests and dependency checks
+
+resource_types:
+- name: pull-request
+  type: docker-image
+  source:
+    repository: teliaoss/github-pr-resource
+    tag: latest
+
+resources:
+- name: pull-request
+  type: pull-request
+  check_every: 1m
+  source:
+    repository: your-org/microservice-api
+    access_token: ((github-access-token))
+    base_branch: main
+- name: integration-image
+  type: docker-image
+  source:
+    repository: your-org/integration-test-image
+    tag: latest
+
+jobs:
+- name: verify-microservice-pr
+  plan:
+  - get: pull-request
+    trigger: true
+    version: every
+    
+  - task: unit-tests
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: golang
+          tag: 1.18-alpine
+      inputs:
+      - name: pull-request
+      run:
+        path: /bin/sh
+        args:
+        - -c
+        - |
+          cd pull-request
+          go mod download
+          go test -v ./... -tags=unit
+    on_failure:
+      put: pull-request
+      params:
+        path: pull-request
+        status: failure
+        comment: "Unit tests failed! Please fix failing tests."
+  
+  - task: build-binary
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: golang
+          tag: 1.18-alpine
+      inputs:
+      - name: pull-request
+      outputs:
+      - name: binaries
+      run:
+        path: /bin/sh
+        args:
+        - -c
+        - |
+          cd pull-request
+          go mod download
+          CGO_ENABLED=0 GOOS=linux go build -o ../binaries/api-server ./cmd/api
+    on_failure:
+      put: pull-request
+      params:
+        path: pull-request
+        status: failure
+        comment: "Build failed! Please check the build logs."
+  
+  - task: integration-tests
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: your-org/integration-test-image
+          tag: latest
+      inputs:
+      - name: pull-request
+      - name: binaries
+      run:
+        path: /bin/sh
+        args:
+        - -c
+        - |
+          # Copy binary to expected location for tests
+          cp binaries/api-server /usr/local/bin/api-server
+          chmod +x /usr/local/bin/api-server
+          
+          # Run integration tests
+          cd pull-request
+          go test -v ./integration/... -tags=integration
+    on_failure:
+      put: pull-request
+      params:
+        path: pull-request
+        status: failure
+        comment: "Integration tests failed! Please fix failing integration tests."
+  
+  - task: dependency-check
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: golang
+          tag: 1.18-alpine
+      inputs:
+      - name: pull-request
+      run:
+        path: /bin/sh
+        args:
+        - -c
+        - |
+          cd pull-request
+          apk add --no-cache git
+          go install github.com/sonatype-nexus-community/nancy@latest
+          go list -json -deps ./... | nancy sleuth
+    on_failure:
+      put: pull-request
+      params:
+        path: pull-request
+        status: failure
+        comment: "Security vulnerability check failed! Please update dependencies."
+  
+  - put: pull-request
+    params:
+      path: pull-request
+      status: success
+      comment: "All verification steps passed successfully!"-image
+        source:
+          repository: python
+          tag: 3.8-slim
+      inputs:
+      - name: pull-request
+      run:
+        path: /bin/sh
+        args:
+        - -c
+        - |
+          cd pull-request
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+          python -m pytest tests/ --cov=app
+    on_failure:
+      put: pull-request
+      params:
+        path: pull-request
+        status: failure
+        comment: "Tests failed on Python 3.8!"
+
+- name: verify-python3.9
+  plan:
+  - get: pull-request
+    trigger: true
+    version: every
+  - task: test-python-3.9
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: python
+          tag: 3.9-slim
+      inputs:
+      - name: pull-request
+      run:
+        path: /bin/sh
+        args:
+        - -c
+        - |
+          cd pull-request
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+          python -m pytest tests/ --cov=app
+    on_failure:
+      put: pull-request
+      params:
+        path: pull-request
+        status: failure
+        comment: "Tests failed on Python 3.9!"
+
+- name: update-status
+  plan:
+  - get: pull-request
+    trigger: true
+    passed: [verify-python3.8, verify-python3.9]
+    version: every
+  - put: pull-request
+    params:
+      path: pull-request
+      status: success
+      comment: "All Python version tests passed!"

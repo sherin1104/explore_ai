@@ -1,0 +1,104 @@
+---
+# Example 2: Java Maven PR Verification with Multiple Steps
+# This pipeline verifies PRs for a Java project with linting, testing, and security scanning
+
+resource_types:
+- name: pull-request
+  type: docker-image
+  source:
+    repository: teliaoss/github-pr-resource
+    tag: latest
+
+resources:
+- name: pull-request
+  type: pull-request
+  check_every: 1m
+  source:
+    repository: your-org/java-backend
+    access_token: ((github-access-token))
+    base_branch: develop
+
+jobs:
+- name: verify-java-pr
+  plan:
+  - get: pull-request
+    trigger: true
+    version: every
+  
+  - task: lint
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: maven
+          tag: 3.8-openjdk-11
+      inputs:
+      - name: pull-request
+      run:
+        path: /bin/sh
+        args:
+        - -c
+        - |
+          cd pull-request
+          mvn checkstyle:check
+    on_failure:
+      put: pull-request
+      params:
+        path: pull-request
+        status: failure
+        comment: "Linting failed! Please fix style issues."
+  
+  - task: test
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: maven
+          tag: 3.8-openjdk-11
+      inputs:
+      - name: pull-request
+      run:
+        path: /bin/sh
+        args:
+        - -c
+        - |
+          cd pull-request
+          mvn test
+    on_failure:
+      put: pull-request
+      params:
+        path: pull-request
+        status: failure
+        comment: "Tests failed! Please fix failing tests."
+  
+  - task: security-scan
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: owasp/dependency-check
+          tag: latest
+      inputs:
+      - name: pull-request
+      run:
+        path: /bin/sh
+        args:
+        - -c
+        - |
+          cd pull-request
+          /usr/share/dependency-check/bin/dependency-check.sh --scan . --format XML
+    on_failure:
+      put: pull-request
+      params:
+        path: pull-request
+        status: failure
+        comment: "Security vulnerabilities detected!"
+  
+  - put: pull-request
+    params:
+      path: pull-request
+      status: success
+      comment: "All verification steps passed successfully!"

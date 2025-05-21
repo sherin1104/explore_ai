@@ -1,0 +1,48 @@
+---
+# Example 1: Basic PR Verification Pipeline
+# This pipeline runs basic tests on pull requests
+
+resource_types:
+- name: pull-request
+  type: docker-image
+  source:
+    repository: teliaoss/github-pr-resource
+    tag: latest
+
+resources:
+- name: pull-request
+  type: pull-request
+  check_every: 1m
+  source:
+    repository: your-org/your-repo
+    access_token: ((github-access-token))
+    base_branch: main
+
+jobs:
+- name: verify-pr
+  plan:
+  - get: pull-request
+    trigger: true
+    version: every
+  - task: run-tests
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: node
+          tag: 14-alpine
+      inputs:
+      - name: pull-request
+      run:
+        path: /bin/sh
+        args:
+        - -c
+        - |
+          cd pull-request
+          npm install
+          npm test
+  - put: pull-request
+    params:
+      path: pull-request
+      status: success

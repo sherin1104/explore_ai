@@ -1,0 +1,156 @@
+# Concourse CI pipeline tailored for building and deploying a Maven project from GitHub pull requests.
+# This pipeline fetches the version from a file, creates a snapshot version based on the PR ID and commit ID
+
+resource_types:
+  - name: github-pr
+    type: docker-image
+    source:
+      repository: teliaoss/github-pr-resource
+      tag: latest
+
+resources:
+  - name: source-pr
+    type: github-pr
+    source:
+      repository: dummy-org/dummy-repo
+      access_token: ((github-access-token))
+      base_branch: master
+      paths:
+        - "**/*"
+
+  - name: version-file
+    type: git
+    source:
+      uri: https://github.com/dummy-org/dummy-repo.git
+      branch: master
+      paths:
+        - version.txt
+
+  - name: maven-repo
+    type: maven-resource
+    source:
+      url: https://artifactory.example.com/artifactory/libs-snapshot-local
+      snapshot_url: https://artifactory.example.com/artifactory/libs-snapshot-local
+      artifact: com.example:dummy-app:jar
+      username: ((artifactory-username))
+      password: ((artifactory-password))
+
+jobs:
+  - name: build-pr
+    plan:
+      - get: source-pr
+        trigger: true
+        version: every
+
+      - get: version-file
+
+      - task: fetch-version
+        config:
+          platform: linux
+          image_resource:
+            type: docker-image
+            source:
+              repository: alpine
+              tag: latest
+          inputs:
+            - name: version-file
+          outputs:
+            - name: version-output
+          run:
+            path: sh
+            args:
+              - -exc
+              - |
+                BASE_VERSION=$(cat version-file/version.txt | tr -d '\n')
+                echo "Base version: $BASE_VERSION"
+                echo "$BASE_VERSION" > version-output/base-version.txt
+
+      - task: fetch-pr-details
+        config:
+          platform: linux
+          image_resource:
+            type: docker-image
+            source:
+              repository: alpine
+              tag: latest
+          inputs:
+            - name: source-pr
+          outputs:
+            - name: pr-details
+          run:
+            path: sh
+            args:
+              - -exc
+              - |
+                # Extract PR ID from metadata file
+                PR_ID=$(cat source-pr/.git/resource/pr)
+                echo "PR ID: $PR_ID"
+                echo "$PR_ID" > pr-details/pr-id.txt
+                
+                # Extract commit ID
+                COMMIT_ID=$(cat source-pr/.git/resource/head_sha)
+                echo "Commit ID: $COMMIT_ID"
+                echo "$COMMIT_ID" > pr-details/commit-id.txt
+                
+                # Short commit ID for version
+                SHORT_COMMIT=$(echo $COMMIT_ID | cut -c 1-7)
+                echo "$SHORT_COMMIT" > pr-details/short-commit-id.txt
+
+      - task: create-snapshot-version
+        config:
+          platform: linux
+          image_resource:
+            type: docker-image
+            source:
+              repository: alpine
+              tag: latest
+          inputs:
+            - name: version-output
+            - name: pr-details
+          outputs:
+            - name: snapshot-version
+          run:
+            path: sh
+            args:
+              - -exc
+              - |
+                BASE_VERSION=$(cat version-output/base-version.txt)
+                PR_ID=$(cat pr-details/pr-id.txt)
+                SHORT_COMMIT=$(cat pr-details/short-commit-id.txt)
+                
+                SNAPSHOT_VERSION="${BASE_VERSION}-${PR_ID}-${SHORT_COMMIT}-SNAPSHOT"
+                echo "Snapshot version: $SNAPSHOT_VERSION"
+                echo "$SNAPSHOT_VERSION" > snapshot-version/version.txt
+
+      - task: maven-build-and-push
+        config:
+          platform: linux
+          image_resource:
+            type: docker-image
+            source:
+              repository: maven
+              tag: 3.8-openjdk-11
+          inputs:
+            - name: source-pr
+            - name: snapshot-version
+          run:
+            path: sh
+            args:
+              - -exc
+              - |
+                cd source-pr
+                SNAPSHOT_VERSION=$(cat ../snapshot-version/version.txt)
+                echo "Building with version: $SNAPSHOT_VERSION"
+                
+                # Set the version in pom.xml
+                mvn versions:set -DnewVersion=$SNAPSHOT_VERSION
+                
+                # Build the project
+                mvn clean package
+                
+                # Deploy to artifactory
+                mvn deploy \
+                  -DskipTests \
+                  -Dartifactory.username=((artifactory-username)) \
+                  -Dartifactory.password=((artifactory-password)) \
+                  -DaltDeploymentRepository=snapshots::default::https://artifactory.example.com/artifactory/libs-snapshot-local

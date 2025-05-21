@@ -1,0 +1,148 @@
+---
+resources:
+  - name: pull-request
+    type: pull-request
+    source:
+      repository: your-org/your-repo
+      access_token: ((github-access-token))
+      
+  - name: golang-image
+    type: docker-image
+    source:
+      repository: golang
+      tag: 1.18-alpine
+
+resource_types:
+  - name: pull-request
+    type: docker-image
+    source:
+      repository: teliaoss/github-pr-resource
+      tag: latest
+
+jobs:
+  - name: verify-pull-request
+    public: true
+    plan:
+      - get: pull-request
+        trigger: true
+        version: every
+        
+      - get: golang-image
+      
+      - task: run-unit-tests
+        image: golang-image
+        config:
+          platform: linux
+          inputs:
+            - name: pull-request
+          run:
+            path: /bin/sh
+            args:
+              - -ec
+              - |
+                cd pull-request
+                go test -v ./...
+          caches:
+            - path: pull-request/go/pkg/mod
+        on_failure:
+          put: pull-request
+          params:
+            path: pull-request
+            status: failure
+            context: unit-tests
+            comment: "❌ Unit tests failed"
+
+      - task: build-binary
+        image: golang-image
+        config:
+          platform: linux
+          inputs:
+            - name: pull-request
+          outputs:
+            - name: binary
+          run:
+            path: /bin/sh
+            args:
+              - -ec
+              - |
+                cd pull-request
+                go build -o ../binary/app ./cmd/main.go
+          caches:
+            - path: pull-request/go/pkg/mod
+        on_failure:
+          put: pull-request
+          params:
+            path: pull-request
+            status: failure
+            context: build
+            comment: "❌ Build failed"
+
+      - task: run-integration-tests
+        image: golang-image
+        config:
+          platform: linux
+          inputs:
+            - name: pull-request
+            - name: binary
+          run:
+            path: /bin/sh
+            args:
+              - -ec
+              - |
+                cd pull-request
+                # Start your app in the background
+                ../binary/app &
+                APP_PID=$!
+                
+                # Wait for app to start
+                sleep 5
+                
+                # Run integration tests
+                go test -v -tags=integration ./...
+                
+                # Kill the app
+                kill $APP_PID
+          caches:
+            - path: pull-request/go/pkg/mod
+        on_failure:
+          put: pull-request
+          params:
+            path: pull-request
+            status: failure
+            context: integration-tests
+            comment: "❌ Integration tests failed"
+
+      - task: check-vulnerabilities
+        image: golang-image
+        config:
+          platform: linux
+          inputs:
+            - name: pull-request
+          run:
+            path: /bin/sh
+            args:
+              - -ec
+              - |
+                cd pull-request
+                # Install Nancy (dependency vulnerability scanner)
+                wget -O /usr/local/bin/nancy https://github.com/sonatype-nexus-community/nancy/releases/download/v1.0.33/nancy-v1.0.33-linux-amd64
+                chmod +x /usr/local/bin/nancy
+                
+                # Run vulnerability check
+                go list -json -deps ./... | nancy sleuth
+          caches:
+            - path: pull-request/go/pkg/mod
+        on_failure:
+          put: pull-request
+          params:
+            path: pull-request
+            status: failure
+            context: security-check
+            comment: "❌ Security vulnerability check failed! Please update dependencies."
+
+      - put: pull-request
+        params:
+          path: pull-request
+          status: success
+          context: ci-pipeline
+          comment: "✅ All verification steps passed successfully!"

@@ -1,0 +1,94 @@
+---
+# Example 3: Python PR Verification with Matrix Testing
+# This pipeline verifies PRs for a Python project across multiple Python versions
+
+resource_types:
+- name: pull-request
+  type: docker-image
+  source:
+    repository: teliaoss/github-pr-resource
+    tag: latest
+
+resources:
+- name: pull-request
+  type: pull-request
+  check_every: 1m
+  source:
+    repository: your-org/python-api
+    access_token: ((github-access-token))
+    base_branch: main
+
+jobs:
+- name: verify-python3.8
+  plan:
+  - get: pull-request
+    trigger: true
+    version: every
+  - task: test-python-3.8
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: python
+          tag: 3.8-slim
+      inputs:
+      - name: pull-request
+      run:
+        path: /bin/sh
+        args:
+        - -c
+        - |
+          cd pull-request
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+          python -m pytest tests/ --cov=app
+    on_failure:
+      put: pull-request
+      params:
+        path: pull-request
+        status: failure
+        comment: "Tests failed on Python 3.8!"
+
+- name: verify-python3.9
+  plan:
+  - get: pull-request
+    trigger: true
+    version: every
+  - task: test-python-3.9
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: python
+          tag: 3.9-slim
+      inputs:
+      - name: pull-request
+      run:
+        path: /bin/sh
+        args:
+        - -c
+        - |
+          cd pull-request
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+          python -m pytest tests/ --cov=app
+    on_failure:
+      put: pull-request
+      params:
+        path: pull-request
+        status: failure
+        comment: "Tests failed on Python 3.9!"
+
+- name: update-status
+  plan:
+  - get: pull-request
+    trigger: true
+    passed: [verify-python3.8, verify-python3.9]
+    version: every
+  - put: pull-request
+    params:
+      path: pull-request
+      status: success
+      comment: "All Python version tests passed!"
